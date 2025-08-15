@@ -1,4 +1,4 @@
-
+import numpy as np
 # Function to compute distance from the football for a given frame
 def compute_distances_by_frame(frame_data):
     # Isolate the football's position within the frame
@@ -14,11 +14,3 @@ def compute_distances_by_frame(frame_data):
                                                    (frame_data['y'] - football_y) ** 2)
     return frame_data
 
-# Apply the function for each frameId group
-df = df.groupby('frameId').apply(compute_distances_by_frame)
-
-# Reset the index if needed
-df.reset_index(drop=True, inplace=True)
-
-# Verify results
-print(df[['frameId', 'displayName', 'dist_from_football']])
