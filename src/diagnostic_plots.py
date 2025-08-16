@@ -1,9 +1,11 @@
-from typing import Iterable, Optional, Tuple, Sequence
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import List, Optional, Sequence, Tuple, Union, Dict
+from typing import List, Optional, Sequence, Tuple, Union, Dict, Any,Iterable
 from matplotlib.lines import Line2D
+
+
 
 
 def plot_dir_orientation_small_multiples(
@@ -402,4 +404,260 @@ def diagnostic_plot(
             figs.append(fig)
 
     return figs if return_fig else None
+
+
+# If your package exposes a constant, prefer that:
+try:
+    from src.field_control_model import PlayerInfluenceModel, DEFAULT_MODEL_KWARGS  # noqa: F401
+except Exception:
+    DEFAULT_MODEL_KWARGS = dict(
+        # grid
+        grid_x_res=200,
+        grid_y_res=100,
+        field_x_max=120.0,
+        field_y_max=53.3,
+        # orientation bias (keep OFF to match old code)
+        orientation_bias_deg=0.0,
+        # Gaussian (your “sigma” scaling)
+        gaussian_scale_factor=0.7,
+        # Gamma
+        alpha_gamma=11.0,
+        beta_min=1.0,
+        beta_max=20.0,
+        gamma_midpoint=15.0,
+        gamma_scale_factor=0.8,
+        max_forward_distance=20.0,
+        forward_decay_factor=1.0,
+        # Angular cone (speed-narrowing)
+        angle_limit_min=15.0,
+        angle_limit_max=45.0,
+        angle_decay_factor=2.0,
+        # Mixture weights (your dynamic_weights)
+        w_gaussian_min=0.2,
+        w_gaussian_max=1.0,
+        gaussian_midpoint=4.0,
+        gaussian_steepness=2.0,
+    )
+    from src.field_control_model import PlayerInfluenceModel  # type: ignore
+
+
+
+
+
+def plot_field_control_small_multiples(
+    df: pd.DataFrame,
+    *,
+    # Data/column schema
+    frame_col: str = "frameId",
+    x_col: str = "x",
+    y_col: str = "y",
+    dir_col: str = "dir",           # 0° = north (+Y), clockwise increasing
+    ori_col: str = "o",             # same convention as dir
+    speed_col: str = "s",           # yards/s
+    dist_from_ball_col: str = "dist_from_football",
+
+    # Visualization layout & style
+    cols: int = 3,                         # 6 panels → 2 rows x 3 cols by default
+    n_panels: int = 6,                     # how many frames to show
+    contour_levels: int = 18,
+    cmap: str = "Reds",
+    contour_alpha: float = 0.30,
+    arrow_scale: float = 3.0,              # overall arrow length multiplier
+    arrow_head_width: float = 0.5,         # head sizes scale with arrow_scale below
+    arrow_head_length: float = 1.0,
+    dir_color: str = "tab:blue",
+    ori_color: str = "tab:orange",
+    grid_alpha: float = 0.15,
+    title_prefix: str = "Field Control (Gaussian–Gamma) • small multiples",
+    show: bool = True,
+
+    # Model configuration
+    model_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[plt.Figure, np.ndarray, List[int]]:
+    """
+    Plot small-multiples of a single player's *field control/influence* across
+    evenly-spaced frames using the current Gaussian–Gamma model.
+
+    This is a diagnostic: each panel shows the player's location, direction/orientation
+    arrows, and the influence density computed at the **actual speed** for that frame.
+
+    Angle convention (matches tracking data):
+      - 0° = due north (up, +Y), degrees increase clockwise to 360°
+      - Conversion to Matplotlib radians is handled by the model: θ = radians(90 − deg)
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Rows for **one player** across a play (or pre-filtered to one player).
+        Must contain at least:
+        `[frame_col, x_col, y_col, dir_col, speed_col, dist_from_ball_col]`.
+        `ori_col` is optional (for the orange arrow).
+
+    frame_col, x_col, y_col, dir_col, ori_col, speed_col, dist_from_ball_col : str
+        Column names in `df`.
+
+    cols : int
+        Number of subplot columns in the grid (rows are determined automatically).
+
+    n_panels : int
+        Number of evenly spaced frames to plot (default 6).
+
+    contour_levels : int
+        Number of contour levels for the filled density plot.
+
+    cmap : str
+        Matplotlib colormap for the density.
+
+    contour_alpha : float
+        Alpha for the filled contours.
+
+    arrow_scale : float
+        Multiplier for arrow lengths; final length ≈ (speed / 11.3) * arrow_scale.
+
+    arrow_head_width, arrow_head_length : float
+        Arrowhead dimensions (these are scaled by `arrow_scale` to keep proportions).
+
+    dir_color, ori_color : str
+        Arrow colors for direction and orientation.
+
+    grid_alpha : float
+        Grid transparency.
+
+    title_prefix : str
+        Figure title prefix.
+
+    show : bool
+        If True, calls `plt.show()` before returning.
+
+    model_kwargs : dict or None
+        Configuration dictionary passed into `PlayerInfluenceModel(**model_kwargs)`.
+        If None, defaults to `DEFAULT_MODEL_KWARGS`.
+
+    Returns
+    -------
+    (fig, axes, frames_used)
+        fig  : Matplotlib Figure
+        axes : Flat ndarray of Axes
+        frames_used : List[int] of the exact frame IDs plotted
+    """
+    # ---- validate input & pick frames ---------------------------------------
+    if df.empty:
+        raise ValueError("Input DataFrame is empty.")
+
+    if frame_col not in df.columns:
+        raise KeyError(f"Column '{frame_col}' not found in DataFrame.")
+
+    frames_present = np.sort(df[frame_col].unique())
+    if frames_present.size < 1:
+        raise ValueError(f"No '{frame_col}' values found.")
+
+    # Choose evenly spaced targets and snap to nearest frames
+    n_panels = max(1, int(n_panels))
+    targets = np.linspace(frames_present.min(), frames_present.max(), n_panels)
+    frames_used: List[int] = []
+    for t in targets:
+        nearest = int(frames_present[np.argmin(np.abs(frames_present - t))])
+        if not frames_used or frames_used[-1] != nearest:
+            frames_used.append(nearest)
+    frames_used = frames_used[:n_panels]
+
+    # ---- build the model ----------------------------------------------------
+    mk = dict(DEFAULT_MODEL_KWARGS)
+    if model_kwargs:
+        mk.update(model_kwargs)
+
+    model = PlayerInfluenceModel(**mk)
+    X, Y = model.grid.X, model.grid.Y
+
+    # ---- layout -------------------------------------------------------------
+    n = len(frames_used)
+    rows = int(np.ceil(n / max(1, cols)))
+    aspect = mk.get("field_y_max", 53.3) / mk.get("field_x_max", 120.0)
+    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 4.8 * rows * aspect))
+    axes = np.atleast_1d(axes).ravel()
+
+    # Scaled heads keep proportions if you change arrow_scale
+    head_w = arrow_head_width * max(0.5, arrow_scale / 3.0)
+    head_l = arrow_head_length * max(0.5, arrow_scale / 3.0)
+
+    # ---- per panel ----------------------------------------------------------
+    for ax, fid in zip(axes, frames_used):
+        row = df.loc[df[frame_col] == fid]
+        if row.empty:
+            ax.axis("off")
+            continue
+        r = row.iloc[0]
+
+        # Extract scalars defensively
+        x0 = float(r[x_col])
+        y0 = float(r[y_col])
+        dir_deg = float(r[dir_col]) if pd.notna(r[dir_col]) else None
+        ori_deg = float(r[ori_col]) if (ori_col in r and pd.notna(r[ori_col])) else None
+        spd = float(r[speed_col]) if (speed_col in r and pd.notna(r[speed_col])) else 0.0
+        dball = float(r[dist_from_ball_col]) if (dist_from_ball_col in r and pd.notna(r[dist_from_ball_col])) else 0.0
+
+        # Compute density using ACTUAL speed
+        if dir_deg is None:
+            ax.axis("off")
+            continue
+
+        pos = (x0, y0)
+        pos_off = model.compute_offset(pos, dir_deg, spd)
+        Z = model.base_distribution(
+            pos_xy=pos,
+            pos_off_xy=pos_off,
+            direction_deg=dir_deg,
+            speed=spd,
+            dist_from_ball=dball,
+        )
+
+        # Field window centered on the player
+        ax.set_xlim(x0 - 20, x0 + 20)
+        ax.set_ylim(0, mk.get("field_y_max", 53.3))
+        for xline in range(10, int(mk.get("field_x_max", 120.0)), 10):
+            ax.axvline(xline, color="k", lw=1, alpha=0.06)
+
+        # Density
+        ax.contourf(X, Y, Z, levels=contour_levels, cmap=cmap, alpha=contour_alpha)
+
+        # Player marker
+        ax.scatter(x0, y0, s=60, c="k", zorder=5)
+
+        # Arrows (use the model’s canonical mapping)
+        L = (spd / 11.3) * arrow_scale
+        th_dir = model.theta_from_tracking(dir_deg, apply_bias=False)
+        ax.arrow(
+            x0, y0, L * np.cos(th_dir), L * np.sin(th_dir),
+            head_width=head_w, head_length=head_l,
+            fc=dir_color, ec=dir_color, lw=1.5, zorder=6
+        )
+
+        if ori_deg is not None:
+            th_ori = model.theta_from_tracking(ori_deg, apply_bias=False)
+            ax.arrow(
+                x0, y0, (L * 0.9) * np.cos(th_ori), (L * 0.9) * np.sin(th_ori),
+                head_width=head_w, head_length=head_l,
+                fc=ori_color, ec=ori_color, lw=1.5, alpha=0.9, zorder=6
+            )
+
+        # Panel title
+        t_dir = f"{dir_deg:.2f}°" if dir_deg is not None else "NA"
+        t_ori = f"{ori_deg:.2f}°" if ori_deg is not None else "NA"
+        ax.set_title(f"Frame {fid} | dir={t_dir} | o={t_ori} | s={spd:.2f} yd/s", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=grid_alpha)
+
+    # Hide any extra axes
+    for ax in axes[n:]:
+        ax.axis("off")
+
+    fig.suptitle(title_prefix, fontsize=14)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+
+    if show:
+        plt.show()
+
+    return fig, axes, frames_used
+
 
