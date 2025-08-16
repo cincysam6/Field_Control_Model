@@ -280,7 +280,7 @@ def diagnostic_plot(
         theta = model.theta_from_tracking(deg, apply_bias=False)
     """
     # Import here to avoid circulars in some package layouts
-    from .player_influence_model import PlayerInfluenceModel  # adjust path if needed
+    from src.field_control_model import PlayerInfluenceModel  # adjust path if needed
 
     # Merge user overrides with defaults (user wins)
     mk = {**DEFAULT_MODEL_KWARGS, **(model_kwargs or {})}
