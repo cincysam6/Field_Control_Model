@@ -2,6 +2,8 @@ from typing import Iterable, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from typing import List, Optional, Sequence, Tuple, Union, Dict
+from matplotlib.lines import Line2D
 
 
 def plot_dir_orientation_small_multiples(
@@ -205,13 +207,7 @@ def plot_dir_orientation_small_multiples(
 
 
 
-from __future__ import annotations
-from typing import List, Optional, Sequence, Tuple, Union, Dict
 
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from matplotlib.lines import Line2D
 
 # Optional import of your canonical defaults
 try:
