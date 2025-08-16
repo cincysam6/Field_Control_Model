@@ -14,3 +14,45 @@ def compute_distances_by_frame(frame_data):
                                                    (frame_data['y'] - football_y) ** 2)
     return frame_data
 
+
+# -------------------------- tiny helpers ------------------------------------
+def pick_panel_kwargs(
+    panel_params: List[Dict[str, Any]],
+    *,
+    title: Optional[str] = None,
+    index: int = 0,
+    updates: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Convenience: select a panel's parameter dict and (optionally) apply updates,
+    yielding a ready-to-use `model_kwargs` dictionary.
+
+    Examples
+    --------
+    >>> _, panels, _ = diagnostic_multiples(..., verbose=True)
+    >>> mk = pick_panel_kwargs(panels, title="Gamma reach ↑", updates={"alpha_gamma": 12.0})
+    >>> model = PlayerInfluenceModel(**mk)
+    """
+    if title is not None:
+        matches = [p for p in panel_params if p.get("title") == title]
+        if not matches:
+            raise ValueError(f"No panel titled '{title}' found.")
+        params = dict(matches[0]["params"])
+    else:
+        params = dict(panel_params[int(index)]["params"])
+
+    # remove non-model keys (like 'speed') if present
+    params.pop("speed", None)
+
+    if updates:
+        params.update(updates)
+    return params
+
+
+def update_kwargs(base_kwargs: Dict[str, Any], **updates: Any) -> Dict[str, Any]:
+    """
+    Copy-and-update helper: start from an existing kwargs dict and return a modified copy.
+    """
+    out = dict(base_kwargs)
+    out.update(updates)
+    return out
