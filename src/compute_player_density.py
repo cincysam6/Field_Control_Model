@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
-
+from src.field_control_model import PlayerInfluenceModel
 # If you keep a canonical default in your package, you can import it like:
 # from .defaults import model_kwargs as DEFAULT_MODEL_KWARGS
 # For notebooks, you can pass `model_kwargs=` explicitly.
