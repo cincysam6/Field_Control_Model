@@ -1,9 +1,14 @@
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Optional, Sequence, Tuple, Union, Dict, Any,Iterable
 from matplotlib.lines import Line2D
+
+
+import math
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 
@@ -660,14 +665,6 @@ def plot_field_control_small_multiples(
 
     return fig, axes, frames_used
 
-from __future__ import annotations
-
-import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
 
 # Prefer the package defaults if available
 try:
