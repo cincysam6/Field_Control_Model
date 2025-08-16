@@ -2,7 +2,7 @@ import numpy as np
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import matplotlib.pyplot as plt
-import pandas as pd\
+import pandas as pd
 
 
 # Function to compute distance from the football for a given frame
