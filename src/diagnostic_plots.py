@@ -202,3 +202,208 @@ def plot_dir_orientation_small_multiples(
         plt.show()
 
     return fig, axes
+
+
+
+from __future__ import annotations
+from typing import List, Optional, Sequence, Tuple, Union, Dict
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from matplotlib.lines import Line2D
+
+# Optional import of your canonical defaults
+try:
+    # If your package has config.py with `model_kwargs`
+    from .config import model_kwargs as DEFAULT_MODEL_KWARGS  # type: ignore
+except Exception:
+    # Fallback defaults (kept in sync with your class docs)
+    DEFAULT_MODEL_KWARGS: Dict = dict(
+        grid_x_res=200, grid_y_res=100, field_x_max=120.0, field_y_max=53.3,
+        orientation_bias_deg=0.0,
+        gaussian_scale_factor=0.7,
+        alpha_gamma=11.0,
+        beta_min=1.0, beta_max=20.0,
+        gamma_midpoint=15.0, gamma_scale_factor=0.8,
+        max_forward_distance=20.0, forward_decay_factor=1.0,
+        angle_limit_min=15.0, angle_limit_max=45.0, angle_decay_factor=2.0,
+        w_gaussian_min=0.2, w_gaussian_max=1.0,
+        gaussian_midpoint=4.0, gaussian_steepness=2.0,
+    )
+
+def diagnostic_plot(
+    df: pd.DataFrame,
+    frame_id: int,
+    player_ids: Optional[Union[int, Sequence[int]]] = None,
+    *,
+    # Speeds to evaluate. Use ("actual",) to use each player's actual speed in that frame.
+    speeds: Union[Sequence[float], Tuple[str, ...]] = (1.0, 5.0, 10.0),
+
+    # NEW: pass all model hyperparameters via a single dict
+    model_kwargs: Optional[Dict] = None,
+
+    # Plot style
+    contour_levels: int = 20,
+    cmap: str = "Reds",
+    alpha: float = 0.30,
+    arrow_scale: float = 5.0,
+    arrow_head_width: float = 1.0,
+    arrow_head_length: float = 2.0,
+    zoom_x_range: float = 10.0,
+    ylim: Optional[Tuple[float, float]] = (0.0, 53.0),
+    grid_alpha: float = 0.20,
+
+    # Direction vs Orientation arrow styles
+    dir_color: str = "tab:blue",
+    ori_color: str = "tab:orange",
+    draw_orientation: bool = True,
+
+    # Behavior
+    show: bool = True,
+    return_fig: bool = False,
+
+    # Column names
+    x_col: str = "x",
+    y_col: str = "y",
+    dir_col: str = "dir",     # 0°=north, clockwise
+    ori_col: str = "o",       # orientation; same convention as dir
+    speed_col: str = "s",     # yd/s
+    dist_from_ball_col: str = "dist_from_football",
+    name_col: str = "displayName",
+) -> Optional[List[plt.Figure]]:
+    """
+    Per-player diagnostic: plot mixed influence (Gaussian+Gamma) and overlay two arrows:
+      - Direction (`dir_col`) in `dir_color`
+      - Orientation (`ori_col`) in `ori_color` (if present and `draw_orientation=True`)
+
+    All model hyperparameters are passed in one dict via `model_kwargs`. If omitted,
+    we load `DEFAULT_MODEL_KWARGS` (from your package config or the fallback above).
+
+    Angles use the SAME converter as the class:
+        theta = model.theta_from_tracking(deg, apply_bias=False)
+    """
+    # Import here to avoid circulars in some package layouts
+    from .player_influence_model import PlayerInfluenceModel  # adjust path if needed
+
+    # Merge user overrides with defaults (user wins)
+    mk = {**DEFAULT_MODEL_KWARGS, **(model_kwargs or {})}
+
+    # Build model from kwargs
+    model = PlayerInfluenceModel(**mk)
+
+    # Compute positions for the requested frame (we’ll recompute Z at chosen speeds)
+    influence_df = model.compute_influence(
+        df=df,
+        frame_id=frame_id,
+        player_ids=player_ids,
+        x_col=x_col,
+        y_col=y_col,
+        dir_col=dir_col,
+        speed_col=speed_col,
+        dist_from_ball_col=dist_from_ball_col,
+        density_out_col="__ignored__",   # we recompute inside the loop
+    )
+
+    X, Y = model.grid.X, model.grid.Y
+    figs: List[plt.Figure] = []
+
+    # Use actual speeds if requested
+    use_actual = (
+        (isinstance(speeds, (list, tuple)) and len(speeds) == 1 and speeds[0] == "actual")
+        or speeds == ("actual",)
+    )
+
+    # Legend proxies for arrows
+    legend_elems = [
+        Line2D([0], [0], color=dir_color, lw=2, label="Direction"),
+        Line2D([0], [0], color=ori_color, lw=2, label="Orientation"),
+    ]
+
+    # Read alpha_gamma from the model config (don’t require a separate function arg)
+    alpha_gamma = float(mk.get("alpha_gamma", 11.0))
+
+    for _, row in influence_df.iterrows():
+        player_pos = (float(row[x_col]), float(row[y_col]))
+        player_dir_deg = float(row[dir_col])
+        dist_from_football = float(row[dist_from_ball_col])
+        display_name = str(row.get(name_col, "Player"))
+
+        if use_actual:
+            speed_list: List[float] = [float(row[speed_col])]
+        else:
+            speed_list = [float(s) for s in speeds]  # type: ignore[arg-type]
+
+        # Try to fetch orientation if present
+        has_ori = draw_orientation and (ori_col in df.columns or ori_col in row.index)
+        player_ori_deg = None
+        if has_ori and pd.notna(row.get(ori_col, np.nan)):
+            player_ori_deg = float(row[ori_col])
+
+        for spd in speed_list:
+            pos_offset = model.compute_offset(player_pos, player_dir_deg, spd)
+
+            Z = model.base_distribution(
+                pos_xy=player_pos,
+                pos_off_xy=pos_offset,
+                direction_deg=player_dir_deg,
+                speed=spd,
+                dist_from_ball=dist_from_football,
+                alpha_gamma=alpha_gamma,   # read from model kwargs
+            )
+
+            fig = plt.figure(figsize=(10, 7))
+            plt.contourf(X, Y, Z, levels=contour_levels, cmap=cmap, alpha=alpha)
+
+            # Player marker
+            plt.scatter(player_pos[0], player_pos[1], c="blue", edgecolor="black", s=100, zorder=5)
+
+            # Direction arrow (uses the class's converter)
+            th_dir = model.theta_from_tracking(player_dir_deg, apply_bias=False)
+            arrow_len = (spd / 11.3) * arrow_scale
+            plt.arrow(
+                player_pos[0], player_pos[1],
+                arrow_len * np.cos(th_dir), arrow_len * np.sin(th_dir),
+                head_width=arrow_head_width, head_length=arrow_head_length,
+                fc=dir_color, ec=dir_color, zorder=6
+            )
+
+            # Orientation arrow (optional, same converter)
+            if player_ori_deg is not None:
+                th_ori = model.theta_from_tracking(player_ori_deg, apply_bias=False)
+                ori_len = arrow_len * 0.9
+                plt.arrow(
+                    player_pos[0], player_pos[1],
+                    ori_len * np.cos(th_ori), ori_len * np.sin(th_ori),
+                    head_width=arrow_head_width, head_length=arrow_head_length,
+                    fc=ori_color, ec=ori_color, alpha=0.9, zorder=6
+                )
+
+            # Title shows both angles if available
+            speed_str = f"{spd:.2f} yd/s" if not use_actual else f"{float(row[speed_col]):.2f} yd/s"
+            if player_ori_deg is not None:
+                title_str = f"{display_name} – Speed={speed_str} | dir={player_dir_deg:.2f}° | o={player_ori_deg:.2f}°"
+            else:
+                title_str = f"{display_name} – Speed={speed_str} | dir={player_dir_deg:.2f}°"
+
+            plt.title(title_str)
+            plt.xlabel("X (yards)")
+            plt.ylabel("Y (yards)")
+            plt.grid(alpha=grid_alpha)
+
+            # Zoom view
+            plt.xlim(player_pos[0] - zoom_x_range, player_pos[0] + zoom_x_range)
+            if ylim is not None:
+                plt.ylim(*ylim)
+
+            # Add arrow legend once (top-left outside plot)
+            if player_ori_deg is not None:
+                plt.legend(handles=legend_elems, loc="upper left")
+
+            if show:
+                plt.show()
+
+            figs.append(fig)
+
+    return figs if return_fig else None
+
