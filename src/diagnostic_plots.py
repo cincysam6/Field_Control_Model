@@ -660,4 +660,254 @@ def plot_field_control_small_multiples(
 
     return fig, axes, frames_used
 
+from __future__ import annotations
+
+import math
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Prefer the package defaults if available
+try:
+    from src.field_control_model import PlayerInfluenceModel, DEFAULT_MODEL_KWARGS  # noqa: F401
+except Exception:
+    DEFAULT_MODEL_KWARGS = dict(
+        # grid
+        grid_x_res=200,
+        grid_y_res=100,
+        field_x_max=120.0,
+        field_y_max=53.3,
+        # orientation bias
+        orientation_bias_deg=0.0,
+        # Gaussian
+        gaussian_scale_factor=0.7,
+        # Gamma
+        alpha_gamma=11.0,
+        beta_min=1.0,
+        beta_max=20.0,
+        gamma_midpoint=15.0,
+        gamma_scale_factor=0.8,
+        max_forward_distance=20.0,
+        forward_decay_factor=1.0,
+        # Angular cone
+        angle_limit_min=15.0,
+        angle_limit_max=45.0,
+        angle_decay_factor=2.0,
+        # Mixture weights
+        w_gaussian_min=0.2,
+        w_gaussian_max=1.0,
+        gaussian_midpoint=4.0,
+        gaussian_steepness=2.0,
+    )
+    from src.field_control_model import PlayerInfluenceModel  # type: ignore
+
+
+def diagnostic_multiples(
+    df: pd.DataFrame,
+    frame_id: int,
+    player_id: Union[int, Sequence[int]],
+    *,
+    speed: float = 5.0,  # evaluate all panels at this speed (yd/s)
+
+    # ---- Plot styling -------------------------------------------------------
+    cmap: str = "Reds",
+    alpha: float = 0.30,
+    contour_levels: int = 18,
+    zoom_x_range: float = 12.0,
+    ylim: Optional[Tuple[float, float]] = (0.0, 53.0),
+    grid_alpha: float = 0.20,
+    cols: int = 4,
+
+    # ---- Behavior / DF schema ----------------------------------------------
+    verbose: bool = False,
+    x_col: str = "x",
+    y_col: str = "y",
+    dir_col: str = "dir",               # 0° up (+Y), 90° right (+X), clockwise increasing
+    speed_col: str = "s",               # (not used; we evaluate at `speed`)
+    dist_from_ball_col: str = "dist_from_football",
+    name_col: str = "displayName",
+
+    # ---- Model config (baseline) -------------------------------------------
+    # Pass overrides here; they are merged onto DEFAULT_MODEL_KWARGS
+    model_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[plt.Figure, List[Dict[str, Any]], pd.DataFrame]:
+    """
+    Build a compact “cheat sheet” of small contour panels to visualize how
+    individual hyperparameters affect the Gaussian–Gamma influence field
+    for one player at a single frame/pose.
+
+    Each panel keeps the same player pose (position + heading) but applies a
+    targeted override to exactly one model knob, so you can compare effects
+    side-by-side.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must include the provided column names. Should contain rows for the
+        target frame and player(s). If `player_id` is not found at the frame,
+        the first non-football row at that frame is used as a fallback.
+    frame_id : int
+        Frame to analyze.
+    player_id : int | sequence of ints
+        Target player(s). If multiple provided, the first present in the frame
+        is used.
+    speed : float
+        Speed (yd/s) at which to evaluate **all** panels, to isolate the effect
+        of model knobs from speed variance.
+
+    Plot styling / behavior options control the look; they do not affect the
+    underlying model computation.
+
+    model_kwargs : dict | None
+        Baseline configuration merged onto DEFAULT_MODEL_KWARGS and used to
+        instantiate the model for each panel before applying that panel's
+        overrides.
+
+    Returns
+    -------
+    fig : Figure
+        Matplotlib figure containing the grid of panels.
+    panel_params : list of dict
+        For each panel: {"title": <str>, "params": <dict of all model params + speed>}.
+    params_df : DataFrame
+        Tidy table of the same per-panel parameter dictionaries (easy to save/compare).
+    """
+    # ---- Select the focal player row ---------------------------------------
+    player_ids = np.atleast_1d(player_id)
+
+    frame_rows = df[df["frameId"] == frame_id].copy()
+    if name_col in frame_rows.columns:
+        frame_rows = frame_rows[frame_rows[name_col].str.lower() != "football"]
+    if frame_rows.empty:
+        raise ValueError(f"No player rows found for frame_id={frame_id}.")
+
+    sel = frame_rows[frame_rows["nflId"].isin(player_ids)]
+    if sel.empty:
+        sel = frame_rows  # fallback for demos
+
+    row = sel.iloc[0]
+    pos = (float(row[x_col]), float(row[y_col]))
+    dir_deg = float(row[dir_col])
+    dist = float(row[dist_from_ball_col]) if dist_from_ball_col in row and pd.notna(row[dist_from_ball_col]) else 0.0
+
+    # ---- Baseline model kwargs ---------------------------------------------
+    mk_base = dict(DEFAULT_MODEL_KWARGS)
+    if model_kwargs:
+        mk_base.update(model_kwargs)
+
+    # ---- Helper to build a model with overrides ----------------------------
+    def _build_model(**override: Any) -> PlayerInfluenceModel:
+        mk = dict(mk_base)
+        mk.update(override)
+        return PlayerInfluenceModel(**mk)
+
+    # ---- Panels: (title, overrides) ----------------------------------------
+    # Each entry minimally overrides *one* knob; everything else comes from mk_base
+    panels: List[Tuple[str, Dict[str, Any]]] = [
+        ("Gaussian scale ↓", {"gaussian_scale_factor": max(0.2, mk_base["gaussian_scale_factor"] * 0.6)}),
+        ("Gaussian scale ↑", {"gaussian_scale_factor": mk_base["gaussian_scale_factor"] * 1.4}),
+
+        ("Gamma α ↓ (flatter)", {"alpha_gamma": max(2.0, mk_base["alpha_gamma"] * 0.7)}),
+        ("Gamma α ↑ (peakier)", {"alpha_gamma": mk_base["alpha_gamma"] * 1.3}),
+
+        ("Gamma reach ↓", {"max_forward_distance": max(6.0, mk_base["max_forward_distance"] * 0.6)}),
+        ("Gamma reach ↑", {"max_forward_distance": mk_base["max_forward_distance"] * 1.4}),
+
+        ("Gamma fade fast", {"forward_decay_factor": 0.6}),
+        ("Gamma fade slow", {"forward_decay_factor": 2.0}),
+
+        ("Cone narrow", {
+            "angle_limit_min": min(
+                max(mk_base["angle_limit_min"], 0.0) + 12.0,
+                max(mk_base["angle_limit_max"] - 5.0, mk_base["angle_limit_min"] + 12.0)
+            ),
+            "angle_limit_max": max(
+                min(mk_base["angle_limit_max"], 85.0) - 12.0,
+                mk_base["angle_limit_min"] + 5.0
+            ),
+        }),
+        ("Cone wide", {
+            "angle_limit_min": max(0.0, mk_base["angle_limit_min"] - 12.0),
+            "angle_limit_max": min(85.0, mk_base["angle_limit_max"] + 12.0),
+        }),
+
+        ("More Gaussian", {"w_gaussian_min": min(0.8, mk_base["w_gaussian_min"] + 0.2)}),
+        ("More Gamma",    {"w_gaussian_min": max(0.0, mk_base["w_gaussian_min"] - 0.2)}),
+    ]
+
+    # ---- Layout figure ------------------------------------------------------
+    n = len(panels)
+    cols_eff = max(1, int(cols))
+    rows = math.ceil(n / cols_eff)
+    fig, axes = plt.subplots(rows, cols_eff, figsize=(4.0 * cols_eff, 3.6 * rows))
+    axes_arr = np.array(axes).reshape(-1) if isinstance(axes, np.ndarray) else np.array([axes])
+
+    panel_params: List[Dict[str, Any]] = []
+
+    # ---- Render each panel --------------------------------------------------
+    for ax, (title, overrides) in zip(axes_arr, panels):
+        model = _build_model(**overrides)
+
+        # Record the exact parameters used (baseline + overrides)
+        used = dict(mk_base)
+        used.update(overrides)
+        used["speed"] = speed
+        panel_params.append({"title": title, "params": used})
+
+        if verbose:
+            print(f"[{title}] {used}")
+
+        # Compute density for this panel / same player pose
+        pos_off = model.compute_offset(pos, dir_deg, speed)
+        Z = model.base_distribution(
+            pos_xy=pos,
+            pos_off_xy=pos_off,
+            direction_deg=dir_deg,
+            speed=speed,
+            dist_from_ball=dist,
+            alpha_gamma=used.get("alpha_gamma", mk_base["alpha_gamma"]),
+        )
+
+        # Draw
+        X, Y = model.grid.X, model.grid.Y
+        ax.contourf(X, Y, Z, levels=contour_levels, cmap=cmap, alpha=alpha)
+        ax.scatter(pos[0], pos[1], c="blue", edgecolor="black", s=45, zorder=5)
+
+        # Direction arrow (model’s canonical angle mapping)
+        theta = model.theta_from_tracking(dir_deg, apply_bias=False)
+        L = (speed / 11.3) * 4.0  # modest for readability
+        ax.arrow(
+            pos[0], pos[1],
+            L * np.cos(theta), L * np.sin(theta),
+            head_width=0.8, head_length=1.6,
+            fc="black", ec="black", zorder=6
+        )
+
+        ax.set_title(title, fontsize=10)
+        ax.set_xlim(pos[0] - zoom_x_range, pos[0] + zoom_x_range)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.grid(alpha=grid_alpha)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Hide any leftover empty axes
+    for i in range(len(panels), len(axes_arr)):
+        axes_arr[i].axis("off")
+
+    fig.suptitle(
+        f"Influence Cheat Sheet • frame {frame_id} • player {player_id} • speed={speed:.2f} yd/s",
+        fontsize=14
+    )
+    fig.tight_layout(rect=[0, 0.02, 1, 0.96])
+
+    # Also return a DataFrame to make saving/comparing parameters easy
+    params_df = pd.json_normalize(panel_params)
+    # columns: 'title', 'params.alpha_gamma', 'params.gaussian_scale_factor', ... etc.
+
+    return fig, panel_params, params_df
+
+
 
