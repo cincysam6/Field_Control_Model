@@ -297,115 +297,112 @@ class AnimatePlayWithDensity:
     # ------------------------------ animation step ------------------------------ #
 
     def update(self, _frame_index):
-    # grab next frame of positional data
-    try:
-        pos_df = next(self._stream)
-    except StopIteration:
-        self._stream = self.data_stream()
-        pos_df = next(self._stream)
-
-    frame_id = int(pos_df.frameId.iloc[0])
-
-    # split
-    offense_df = pos_df[pos_df.is_off == 1]
-    defense_df = pos_df[pos_df.is_off == 0]
-    ball_df    = pos_df[pos_df.team == 'football'] if 'team' in pos_df.columns \
-                 else pos_df[pos_df.displayName.str.lower() == 'football']
-
-    # update scatters safely (prevents ghost dots)
-    to_xy = lambda d: np.column_stack((d["x"].to_numpy(float), d["y"].to_numpy(float))) if not d.empty else np.empty((0,2))
-    self._set_offsets_safely(self._scat_offense, to_xy(offense_df), 500.0)
-    self._set_offsets_safely(self._scat_defense, to_xy(defense_df), 500.0)
-    self._set_offsets_safely(self._scat_ball,    to_xy(ball_df),    100.0)
-
-    self._ax_field.set_title(f"{self._title} — Frame {frame_id}")
-
-    # clear old contours
-    self.clear_contours_safe(self._contours)
-
-    # plot densities for this frame
-    if self.show_contours:
-        frame_density_df = self._precomputed_df[self._precomputed_df.frameId == frame_id]
-        for _, prow in frame_density_df.iterrows():
-            Z = prow.get('density', None)
-            if Z is None:
-                continue
-            cmap = self.on_cmap if prow.get('is_off', 0) == 1 else self.off_cmap
-            Z_masked = np.where(Z > 0.01, Z, np.nan)
-            cont = self._ax_field.contourf(self._X, self._Y, Z_masked,
-                                           cmap=cmap, levels=self.contour_levels, alpha=self.contour_alpha)
-            self._contours.append(cont)
-
-    # update per-player labels + arrows
-    labeled = pos_df[pos_df.jerseyNumber.notnull()].reset_index(drop=True)
-    for idx in range(min(len(labeled), self._MAX_FIELD_PLAYERS)):
-        row = labeled.iloc[idx]
-        x0, y0 = float(row["x"]), float(row["y"])
-
-        # jersey/number/name
-        self._scat_jersey_list[idx].set_position((x0, y0))
-        self._scat_jersey_list[idx].set_text(row["position"] if "position" in row else "")
-        self._scat_number_list[idx].set_position((x0, y0 + 1.5))
         try:
-            self._scat_number_list[idx].set_text(int(row["jerseyNumber"]))
-        except Exception:
-            self._scat_number_list[idx].set_text("")
-        self._scat_name_list[idx].set_position((x0, y0 - 1.5))
-        name = row["displayName"].split()[-1] if isinstance(row["displayName"], str) else ""
-        self._scat_name_list[idx].set_text(name)
-
-        # Find matching precomputed row once
-        match = self._precomputed_df[
-            (self._precomputed_df.frameId == frame_id) & (self._precomputed_df.nflId == row["nflId"])
-        ]
-
-        # ALWAYS resolve row_bias first so it's available for both arrows
-        row_bias = self.orientation_bias_deg
-        if not match.empty and ("orientation_bias_deg" in match.columns):
+            pos_df = next(self._stream)
+        except StopIteration:
+            self._stream = self.data_stream()
+            pos_df = next(self._stream)
+    
+        frame_id = int(pos_df.frameId.iloc[0])
+    
+        # split
+        offense_df = pos_df[pos_df.is_off == 1]
+        defense_df = pos_df[pos_df.is_off == 0]
+        ball_df = pos_df[pos_df.team == 'football'] if 'team' in pos_df.columns \
+                  else pos_df[pos_df.displayName.str.lower() == 'football']
+    
+        # update scatters safely (prevents ghost dots)
+        to_xy = lambda d: np.column_stack((d["x"].to_numpy(float), d["y"].to_numpy(float))) if not d.empty else np.empty((0, 2))
+        self._set_offsets_safely(self._scat_offense, to_xy(offense_df), 500.0)
+        self._set_offsets_safely(self._scat_defense, to_xy(defense_df), 500.0)
+        self._set_offsets_safely(self._scat_ball,    to_xy(ball_df),    100.0)
+    
+        self._ax_field.set_title(f"{self._title} — Frame {frame_id}")
+    
+        # clear old contours
+        self.clear_contours_safe(self._contours)
+    
+        # plot densities for this frame
+        if self.show_contours:
+            frame_density_df = self._precomputed_df[self._precomputed_df.frameId == frame_id]
+            for _, prow in frame_density_df.iterrows():
+                Z = prow.get('density', None)
+                if Z is None:
+                    continue
+                cmap = self.on_cmap if prow.get('is_off', 0) == 1 else self.off_cmap
+                Z_masked = np.where(Z > 0.01, Z, np.nan)
+                cont = self._ax_field.contourf(self._X, self._Y, Z_masked,
+                                               cmap=cmap, levels=self.contour_levels, alpha=self.contour_alpha)
+                self._contours.append(cont)
+    
+        # update per-player labels + arrows
+        labeled = pos_df[pos_df.jerseyNumber.notnull()].reset_index(drop=True)
+        for idx in range(min(len(labeled), self._MAX_FIELD_PLAYERS)):
+            row = labeled.iloc[idx]
+            x0, y0 = float(row["x"]), float(row["y"])
+    
+            # jersey/number/name
+            self._scat_jersey_list[idx].set_position((x0, y0))
+            self._scat_jersey_list[idx].set_text(row["position"] if "position" in row else "")
+            self._scat_number_list[idx].set_position((x0, y0 + 1.5))
             try:
-                row_bias = float(match.iloc[0].get("orientation_bias_deg", row_bias))
+                self._scat_number_list[idx].set_text(int(row["jerseyNumber"]))
             except Exception:
-                pass
-
-        # Resolve heading (direction) theta
-        theta_rad = match.iloc[0].get("theta_rad", None) if not match.empty else None
-        if theta_rad is None:
-            # fall back to tracking dir (or 'direction') with the same bias mapping
-            dir_deg = float(row["dir"]) if "dir" in row else float(row.get("direction", 0.0))
-            theta_rad = self._theta_from_tracking(dir_deg, row_bias)
-
-        # arrow length (modest speed scaling + boost)
-        spd = float(row["s"]) if "s" in row else float(row.get("speed", 0.0))
-        L = self.arrow_length_boost * self.arrow_scale * (1.0 + min(max(spd, 0.0), 11.3) / 11.3)
-
-        # replace "direction" (black) arrow
-        self._a_dir_list[idx].remove()
-        self._a_dir_list[idx] = self._ax_field.add_patch(
-            Arrow(x0, y0, L*np.cos(theta_rad), L*np.sin(theta_rad),
-                  color='k', width=self.arrow_tail_width, lw=0, alpha=1.0, zorder=7)
-        )
-
-        # replace "orientation" (grey) arrow — optional
-        self._a_or_list[idx].remove()
-        if ("o" in row) and (row["o"] == row["o"]):  # pd.notna without importing pandas here
-            orient_theta = self._theta_from_tracking(float(row["o"]), row_bias)
-            self._a_or_list[idx] = self._ax_field.add_patch(
-                Arrow(x0, y0, (L*0.6)*np.cos(orient_theta), (L*0.6)*np.sin(orient_theta),
-                      color='grey', width=self.arrow_tail_width*1.2, alpha=0.95, zorder=6)
+                self._scat_number_list[idx].set_text("")
+            self._scat_name_list[idx].set_position((x0, y0 - 1.5))
+            name = row["displayName"].split()[-1] if isinstance(row["displayName"], str) else ""
+            self._scat_name_list[idx].set_text(name)
+    
+            # Find matching precomputed row once
+            match = self._precomputed_df[
+                (self._precomputed_df.frameId == frame_id) & (self._precomputed_df.nflId == row["nflId"])
+            ]
+    
+            # ALWAYS resolve row_bias first so it's available for both arrows
+            row_bias = self.orientation_bias_deg
+            if not match.empty and ("orientation_bias_deg" in match.columns):
+                try:
+                    row_bias = float(match.iloc[0].get("orientation_bias_deg", row_bias))
+                except Exception:
+                    pass
+    
+            # Resolve heading (direction) theta
+            theta_rad = match.iloc[0].get("theta_rad", None) if not match.empty else None
+            if theta_rad is None:
+                # fall back to tracking dir (or 'direction') with the same bias mapping
+                dir_deg = float(row["dir"]) if "dir" in row else float(row.get("direction", 0.0))
+                theta_rad = self._theta_from_tracking(dir_deg, row_bias)
+    
+            # arrow length (modest speed scaling + boost)
+            spd = float(row["s"]) if "s" in row else float(row.get("speed", 0.0))
+            L = self.arrow_length_boost * self.arrow_scale * (1.0 + min(max(spd, 0.0), 11.3) / 11.3)
+    
+            # replace "direction" (black) arrow
+            self._a_dir_list[idx].remove()
+            self._a_dir_list[idx] = self._ax_field.add_patch(
+                Arrow(x0, y0, L*np.cos(theta_rad), L*np.sin(theta_rad),
+                      color='k', width=self.arrow_tail_width, lw=0, alpha=1.0, zorder=7)
             )
-        else:
-            self._a_or_list[idx] = self._ax_field.add_patch(Arrow(0, 0, 0, 0, color='grey', width=0))
-
-    # Hide any unused artists
-    for idx in range(len(labeled), self._MAX_FIELD_PLAYERS):
-        self._scat_jersey_list[idx].set_text('')
-        self._scat_number_list[idx].set_text('')
-        self._scat_name_list[idx].set_text('')
-        self._a_dir_list[idx].remove()
-        self._a_or_list[idx].remove()
-
-    return (self._scat_ball, self._scat_offense, self._scat_defense,
-            *self._scat_jersey_list, *self._scat_number_list, *self._scat_name_list,
-            *self._a_dir_list, *self._a_or_list)
-
-
+    
+            # replace "orientation" (grey) arrow — optional
+            self._a_or_list[idx].remove()
+            if ("o" in row) and (row["o"] == row["o"]):  # pd.notna without importing pandas here
+                orient_theta = self._theta_from_tracking(float(row["o"]), row_bias)
+                self._a_or_list[idx] = self._ax_field.add_patch(
+                    Arrow(x0, y0, (L*0.6)*np.cos(orient_theta), (L*0.6)*np.sin(orient_theta),
+                          color='grey', width=self.arrow_tail_width*1.2, alpha=0.95, zorder=6)
+                )
+            else:
+                self._a_or_list[idx] = self._ax_field.add_patch(Arrow(0, 0, 0, 0, color='grey', width=0))
+    
+        # Hide any unused artists
+        for idx in range(len(labeled), self._MAX_FIELD_PLAYERS):
+            self._scat_jersey_list[idx].set_text('')
+            self._scat_number_list[idx].set_text('')
+            self._scat_name_list[idx].set_text('')
+            self._a_dir_list[idx].remove()
+            self._a_or_list[idx].remove()
+    
+        return (self._scat_ball, self._scat_offense, self._scat_defense,
+                *self._scat_jersey_list, *self._scat_number_list, *self._scat_name_list,
+                *self._a_dir_list, *self._a_or_list)
