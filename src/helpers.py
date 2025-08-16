@@ -1,4 +1,10 @@
 import numpy as np
+import math
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import matplotlib.pyplot as plt
+import pandas as pd\
+
+
 # Function to compute distance from the football for a given frame
 def compute_distances_by_frame(frame_data):
     # Isolate the football's position within the frame
