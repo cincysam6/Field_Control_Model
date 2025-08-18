@@ -403,3 +403,139 @@ def plot_team_densities_small_multiples(
 
     return fig, axes, frames_used
 
+
+
+def visualize_team_control(
+    pitch_control_df: pd.DataFrame,
+    player_df: pd.DataFrame,
+    frame_id: int,
+    *,
+    frame_col: str = "frameId",          # <-- NEW: which column holds frame ids
+    heading_col: str = "dir",            # prefer "dir"; falls back to "direction"
+    invert_heading: bool = False,
+    arrow_scale: float = 5.0,
+    constant_arrow: bool = False,
+    xlim: Optional[Tuple[float, float]] = (60, 110),
+    ylim: Optional[Tuple[float, float]] = (5, 45),
+    allow_nearest: bool = True,          # <-- NEW: snap to nearest available frame if exact missing
+    show: bool = True,
+):
+    """
+    Plot pitch control for one frame with player dots, jersey numbers, names, and arrows.
+
+    - Tolerant to schema: uses 'direction' if present, else `heading_col` (default 'dir');
+      uses 'speed' if present, else 's'.
+    - Filters out the football row (by 'team' or 'displayName').
+    - If `allow_nearest=True`, will snap to the closest available `frame_col` value
+      when the exact `frame_id` is missing (useful when you computed a subset).
+    """
+
+    def theta_from_tracking(deg: float) -> float:
+        return np.deg2rad((90.0 - float(deg)) % 360.0)
+
+    # --- coerce frame ids and find the target frame -------------------------
+    f = player_df.copy()
+
+    if frame_col not in f.columns:
+        raise KeyError(f"Expected '{frame_col}' in player_df; have {list(f.columns)}")
+
+    # Coerce frame id column to numeric ints (handles strings)
+    f[frame_col] = pd.to_numeric(f[frame_col], errors="coerce").astype("Int64")
+
+    # Pick the exact or nearest frame
+    target_frame = int(frame_id)
+    f_this = f[f[frame_col] == target_frame]
+
+    if f_this.empty and allow_nearest:
+        present = f[frame_col].dropna().astype(int).unique()
+        if present.size == 0:
+            raise ValueError("player_df has no valid frame ids.")
+        nearest = int(present[np.argmin(np.abs(present - target_frame))])
+        f_this = f[f[frame_col] == nearest]
+        target_frame = nearest  # update for display
+
+    if f_this.empty:
+        raise ValueError(f"No player rows found for {frame_col}={frame_id}.")
+
+    # Remove football rows
+    if "team" in f_this.columns:
+        f_this = f_this[~f_this["team"].astype(str).str.lower().eq("football")]
+    if "displayName" in f_this.columns:
+        f_this = f_this[~f_this["displayName"].astype(str).str.lower().eq("football")]
+
+    # Create stable aliases for heading & speed
+    if "direction" not in f_this.columns and heading_col in f_this.columns:
+        f_this = f_this.assign(direction=f_this[heading_col])
+    if "speed" not in f_this.columns and "s" in f_this.columns:
+        f_this = f_this.assign(speed=f_this["s"])
+
+    # Normalize is_off to {0,1}
+    if "is_off" in f_this.columns:
+        f_this["is_off"] = f_this["is_off"].astype(float).fillna(0).astype(int)
+    else:
+        f_this["is_off"] = 0
+
+    # --- make the figure ----------------------------------------------------
+    fig, ax = plt.subplots(figsize=(16, 8))
+    ax.set_title(f"Team Field Control — Frame {target_frame}")
+
+    cs = ax.contourf(
+        pitch_control_df.columns,   # x
+        pitch_control_df.index,     # y
+        pitch_control_df.values,
+        cmap="coolwarm", levels=20, alpha=0.8
+    )
+    fig.colorbar(cs, ax=ax, label="Field Control (defense → 1.0)")
+
+    # --- draw players --------------------------------------------------------
+    for row in f_this.itertuples(index=False):
+        x0 = float(getattr(row, "x"))
+        y0 = float(getattr(row, "y"))
+
+        dot_color = "blue" if getattr(row, "is_off", 0) == 1 else "red"
+        ax.scatter(x0, y0, color=dot_color, edgecolor="black", s=120, zorder=5)
+
+        # jersey & name
+        jn = getattr(row, "jerseyNumber", None)
+        if jn is not None and not (isinstance(jn, float) and np.isnan(jn)):
+            ax.text(x0, y0 + 1.0, f"{int(jn)}", fontsize=9, ha="center", color="black", zorder=6)
+
+        name = getattr(row, "displayName", "")
+        if isinstance(name, str) and name:
+            ax.text(x0, y0 - 1.4, name, fontsize=8, ha="center", color="black", zorder=6)
+
+        # heading arrow
+        deg = getattr(row, "direction", None)
+        if deg is None and hasattr(row, heading_col):
+            deg = getattr(row, heading_col)
+
+        if deg is not None and not (isinstance(deg, float) and np.isnan(deg)):
+            deg = float(deg)
+            if invert_heading:
+                deg = (deg + 180.0) % 360.0
+            th = theta_from_tracking(deg)
+
+            spd = getattr(row, "speed", 0.0)
+            try:
+                spd = float(spd)
+            except Exception:
+                spd = 0.0
+
+            L = (arrow_scale if constant_arrow else arrow_scale * (spd / 11.3))
+            ax.arrow(
+                x0, y0,
+                L * np.cos(th), L * np.sin(th),
+                head_width=0.375, head_length=0.75, fc="black", ec="black", zorder=7
+            )
+
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_xlabel("X (yards)")
+    ax.set_ylabel("Y (yards)")
+    ax.grid(alpha=0.4)
+
+    if show:
+        plt.show()
+    return fig, ax
