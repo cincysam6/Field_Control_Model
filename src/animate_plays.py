@@ -344,3 +344,330 @@ class AnimatePlayWithDensity:
             *self._scat_jersey_list, *self._scat_number_list, *self._scat_name_list,
             *self._a_dir_list, *self._a_or_list,
         )
+
+def animate_pitch_control_with_players(
+    *,
+    player_df: pd.DataFrame,
+    pc_by_frame: dict,                  # {frameId: pitch_control_df}
+    frames: list,                       # ordered list of frameIds to animate
+    heading_col: str = "direction",     # compute_* functions store heading here
+    arrow_scale: float = 5.0,
+    constant_arrow: bool = False,
+    xlim=(60, 110),
+    ylim=(5, 45),
+    cmap="coolwarm",
+    levels: int = 20,
+    surface_alpha: float = 0.8,
+    figsize=(16, 8),
+    show_colorbar: bool = True,
+):
+    """Animate team pitch control + player dots/numbers/names/arrows."""
+
+    def theta_from_tracking(deg: float) -> float:
+        # 0° = north/up (+Y), clockwise → matplotlib (0 rad = +X, CCW)
+        return np.deg2rad((90.0 - float(deg)) % 360.0)
+
+    # ---------- figure & static scaffolding ----------
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xlim(*xlim); ax.set_ylim(*ylim)
+    ax.set_xlabel("X (yards)"); ax.set_ylabel("Y (yards)")
+    ax.grid(alpha=0.4)
+    for xv in range(10, 120, 10):
+        ax.axvline(xv, color="k", lw=1, alpha=0.06)
+
+    f0 = frames[0]
+    Z0 = pc_by_frame[f0].values
+    X = pc_by_frame[f0].columns.values
+    Y = pc_by_frame[f0].index.values
+
+    # draw first surface and capture the artists explicitly
+    cs0 = ax.contourf(X, Y, Z0, cmap=cmap, levels=levels, alpha=surface_alpha)
+    contour_artists = list(getattr(cs0, "collections", [])) or (cs0 if hasattr(cs0, "__iter__") else [])
+    cbar = None
+    if show_colorbar:
+        cbar = fig.colorbar(cs0, ax=ax, label="Field Control (defense → 1.0)")
+
+    title = ax.set_title(f"Team Field Control — Frame {f0}")
+
+    # holders we’ll refresh each frame
+    scatters, texts_num, texts_name, arrows = [], [], [], []
+
+    def _clear_artists(artists):
+        # Safely remove any list of artists
+        for a in list(artists):
+            try:
+                a.remove()
+            except Exception:
+                pass
+        artists.clear()
+
+    def _draw_players(frame_id: int):
+        _clear_artists(scatters)
+        _clear_artists(texts_num)
+        _clear_artists(texts_name)
+        _clear_artists(arrows)
+
+        f = player_df[player_df["frameId"] == frame_id]
+        for row in f.itertuples(index=False):
+            x0 = float(getattr(row, "x"))
+            y0 = float(getattr(row, "y"))
+            is_off_val = getattr(row, "is_off", 0)
+            try:
+                is_off_bool = bool(int(is_off_val))
+            except Exception:
+                is_off_bool = False
+            color = "blue" if is_off_bool else "red"
+
+            sc = ax.scatter(x0, y0, color=color, edgecolor="black", s=120, zorder=5)
+            scatters.append(sc)
+
+            jn = getattr(row, "jerseyNumber", None)
+            if jn is not None and not (isinstance(jn, float) and np.isnan(jn)):
+                tnum = ax.text(x0, y0 + 1.0, f"{int(jn)}", fontsize=9, ha="center", color="black", zorder=6)
+                texts_num.append(tnum)
+
+            name = getattr(row, "displayName", "")
+            if isinstance(name, str) and name:
+                tname = ax.text(x0, y0 - 1.4, name, fontsize=8, ha="center", color="black", zorder=6)
+                texts_name.append(tname)
+
+            # heading
+            deg = getattr(row, heading_col, getattr(row, "dir", None))
+            if deg is not None and not (isinstance(deg, float) and np.isnan(deg)):
+                th = theta_from_tracking(float(deg))
+                spd = getattr(row, "speed", getattr(row, "s", 0.0))
+                try:
+                    spd = float(spd)
+                except Exception:
+                    spd = 0.0
+                L = (arrow_scale if constant_arrow else arrow_scale * (spd / 11.3))
+                ar = ax.arrow(
+                    x0, y0, L*np.cos(th), L*np.sin(th),
+                    head_width=0.375, head_length=0.75, fc="black", ec="black", zorder=7
+                )
+                arrows.append(ar)
+
+    _draw_players(f0)
+
+    def _update(i):
+        fid = frames[i]
+        title.set_text(f"Team Field Control — Frame {fid}")
+
+        # remove previous contour artists robustly
+        _clear_artists(contour_artists)
+
+        # draw new surface and refresh the stored artist list
+        cs = ax.contourf(X, Y, pc_by_frame[fid].values, cmap=cmap, levels=levels, alpha=surface_alpha)
+        contour_artists[:] = list(getattr(cs, "collections", [])) or (cs if hasattr(cs, "__iter__") else [])
+
+        if cbar is not None:
+            try:
+                cbar.update_normal(cs)
+            except Exception:
+                # fallback: replace colorbar mappable
+                cbar.mappable = cs
+                cbar.draw_all()
+
+        _draw_players(fid)
+        # return all artists for blit=False (harmless) or completeness
+        return contour_artists + scatters + texts_num + texts_name + arrows + [title]
+
+    ani = animation.FuncAnimation(fig, _update, frames=len(frames), interval=120, blit=False)
+    plt.close(fig)
+    return ani
+
+
+def animate_pitch_control_with_players_fast(
+    *,
+    player_df: pd.DataFrame,
+    pc_by_frame: Dict[int, pd.DataFrame],   # {frameId: pitch_control_df (index=Y, columns=X)}
+    frames: List[int],                      # ordered list of frameIds to animate
+    heading_col: str = "direction",         # fallback to "dir" if missing
+
+    # ---- constant arrows (no speed scaling) ----
+    arrow_len: float = 2.0,                 # yards; short stem off the dot
+    # small head, smaller than s=120 scatter
+    head_length_pt: float = 4.0,            # points
+    head_width_pt: float  = 3.0,            # points
+    shaft_width_ax: float = 0.006,          # axes fraction; thin
+
+    # view & style
+    xlim: Tuple[float, float] = (60, 110),
+    ylim: Tuple[float, float] = (5, 45),
+    cmap: str = "coolwarm",
+    surface_alpha: float = 0.85,
+    figsize: Tuple[int, int] = (16, 8),
+    show_colorbar: bool = True,
+    show_labels: bool = True,               # jersey numbers + names
+    max_players: int = 22,                  # text labels capacity
+    max_arrows: int = 30,                   # quiver capacity (>= players shown per frame)
+    interval_ms: int = 80,                  # ~12.5 fps
+) -> animation.FuncAnimation:
+    """
+    Fast animation of team pitch control + players using imshow (surface) and a fixed-size
+    quiver for arrows. Arrows are constant length with a small head (no speed scaling).
+    """
+
+    def theta_from_tracking(deg: float) -> float:
+        # 0° = +Y (north), clockwise → Matplotlib radians (0 rad = +X, CCW)
+        return np.deg2rad((90.0 - float(deg)) % 360.0)
+
+    # ---------- figure & static scaffolding ----------
+    f0 = frames[0]
+    z0 = pc_by_frame[f0].values
+    X = pc_by_frame[f0].columns.to_numpy(dtype=float)
+    Y = pc_by_frame[f0].index.to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xlim(*xlim); ax.set_ylim(*ylim)
+    ax.set_xlabel("X (yards)"); ax.set_ylabel("Y (yards)")
+    ax.grid(alpha=0.4)
+    for xv in range(10, 120, 10):
+        ax.axvline(xv, color="k", lw=1, alpha=0.06)
+
+    im = ax.imshow(
+        z0,
+        extent=[X.min(), X.max(), Y.min(), Y.max()],
+        origin="lower",
+        cmap=cmap,
+        alpha=surface_alpha,
+        interpolation="nearest",
+        aspect="auto",
+        vmin=0.0, vmax=1.0,
+        zorder=0,
+    )
+    cbar = fig.colorbar(im, ax=ax, label="Field Control (defense → 1.0)") if show_colorbar else None
+    title = ax.set_title(f"Team Field Control — Frame {f0}")
+
+    scat_off = ax.scatter([], [], s=120, c="blue", edgecolors="black", zorder=10)
+    scat_def = ax.scatter([], [], s=120, c="red",  edgecolors="black", zorder=10)
+    scat_ball = ax.scatter([], [], s=90,  c="black", zorder=12)
+
+    # ---------- FIXED-SIZE QUIVER (off-screen padding, no NaNs) ----------
+    OFF = 1e9  # off-canvas marker
+    q_offsets = np.full((max_arrows, 2), OFF, dtype=float)
+    q_U = np.zeros((max_arrows,), dtype=float)
+    q_V = np.zeros((max_arrows,), dtype=float)
+    quiv = ax.quiver(
+        q_offsets[:, 0], q_offsets[:, 1], q_U, q_V,
+        angles="xy", scale_units="xy", scale=1.0, pivot="tail",
+        width=shaft_width_ax, color="black", linewidths=0.3,
+        headlength=head_length_pt, headaxislength=head_length_pt*0.9, headwidth=head_width_pt,
+        zorder=20
+    )
+
+    # Preallocate jersey numbers + names (Text)
+    nums = [ax.text(0, 0, "", fontsize=9, ha="center", color="black", zorder=18, visible=False)
+            for _ in range(max_players)]
+    names = [ax.text(0, 0, "", fontsize=8, ha="center", color="black", zorder=18, visible=False)
+             for _ in range(max_players)]
+
+    # ---------- helpers ----------
+    def _frame_slice(fid: int) -> pd.DataFrame:
+        f = player_df[player_df["frameId"] == fid]
+        if f.empty:
+            return f
+        if "displayName" in f.columns:
+            f = f[f["displayName"].str.lower() != "football"]
+        return f
+
+    def _to_offsets(d: pd.DataFrame) -> np.ndarray:
+        if d.empty:
+            return np.empty((0, 2), dtype=float)
+        return np.column_stack((d["x"].to_numpy(float), d["y"].to_numpy(float)))
+
+    def _compute_vectors(d: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """Constant-length arrows in (U,V), independent of speed."""
+        if d.empty:
+            return np.empty((0,)), np.empty((0,))
+        if heading_col not in d.columns and "dir" in d.columns:
+            hdg = d["dir"].to_numpy(float)
+        else:
+            hdg = d[heading_col].to_numpy(float)
+        th = np.deg2rad((90.0 - hdg) % 360.0)
+        U = arrow_len * np.cos(th)
+        V = arrow_len * np.sin(th)
+        return U, V
+
+    def _update_texts(d: pd.DataFrame):
+        if not show_labels:
+            for t in nums + names: t.set_visible(False)
+            return
+        n = min(len(d), max_players)
+        if n == 0:
+            for t in nums + names: t.set_visible(False)
+            return
+        sub = d.iloc[:n]
+        xs = sub["x"].to_numpy(float); ys = sub["y"].to_numpy(float)
+
+        jvals = sub.get("jerseyNumber", pd.Series([None]*n, index=sub.index)).to_numpy(object)
+        for i in range(n):
+            nums[i].set_position((xs[i], ys[i] + 1.0))
+            try:
+                txt = "" if jvals[i] is None or (isinstance(jvals[i], float) and np.isnan(jvals[i])) else str(int(jvals[i]))
+            except Exception:
+                txt = ""
+            nums[i].set_text(txt); nums[i].set_visible(bool(txt))
+
+        names_raw = sub.get("displayName", pd.Series([""]*n, index=sub.index)).astype(str).to_numpy()
+        for i in range(n):
+            nm = names_raw[i].split()[-1] if names_raw[i] else ""
+            names[i].set_position((xs[i], ys[i] - 1.4))
+            names[i].set_text(nm); names[i].set_visible(bool(nm))
+
+        for i in range(n, max_players):
+            nums[i].set_visible(False); names[i].set_visible(False)
+
+    # ---------- animation callbacks ----------
+    def _init():
+        artists = [im, scat_off, scat_def, scat_ball, quiv, title]
+        artists += nums + names
+        return artists
+
+    def _update(i: int):
+        fid = frames[i]
+        title.set_text(f"Team Field Control — Frame {fid}")
+        im.set_data(pc_by_frame[fid].values)
+
+        f = _frame_slice(fid)
+        off = f[f.get("is_off", 0).astype(bool)]
+        de  = f[~f.get("is_off", 0).astype(bool)]
+
+        # scatters
+        scat_off.set_offsets(_to_offsets(off))
+        scat_def.set_offsets(_to_offsets(de))
+        ball = player_df[(player_df["frameId"] == fid) &
+                         (player_df.get("displayName", "").str.lower() == "football")]
+        scat_ball.set_offsets(_to_offsets(ball))
+
+        # -------- fixed-size quiver update (off-screen padding) --------
+        all_df = pd.concat([off, de], axis=0) if (not off.empty or not de.empty) else pd.DataFrame(columns=["x","y"])
+        n = min(len(all_df), max_arrows)
+        if n > 0:
+            offs = _to_offsets(all_df.iloc[:n])
+            U,V = _compute_vectors(all_df.iloc[:n])
+            # move all arrow slots off-screen, then fill first n
+            q_offsets[:, :] = OFF
+            q_U[:] = 0.0; q_V[:] = 0.0
+            q_offsets[:n, :] = offs
+            q_U[:n], q_V[:n] = U, V
+        else:
+            # no players: keep everything off-screen
+            q_offsets[:, :] = OFF
+            q_U[:] = 0.0; q_V[:] = 0.0
+
+        quiv.set_offsets(q_offsets)
+        quiv.set_UVC(q_U, q_V)
+
+        _update_texts(f)
+
+        artists = [im, scat_off, scat_def, scat_ball, quiv, title]
+        artists += [t for t in nums + names if t.get_visible()]
+        return artists
+
+    ani = animation.FuncAnimation(
+        fig, _update, init_func=_init, frames=len(frames),
+        interval=interval_ms, blit=True
+    )
+    plt.close(fig)
+    return ani
