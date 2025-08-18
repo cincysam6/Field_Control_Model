@@ -222,3 +222,211 @@ def compute_player_densities_dataframe(
     all_player_df = all_player_df[cols_final]
 
     return all_player_df, (X, Y)
+
+
+
+def compute_player_densities_team_control(
+    model,                         # PlayerInfluenceModel (required if recomputing)
+    df: pd.DataFrame,
+    *,
+    # ---- which frames (pick ONE style) ----
+    frame_id: Optional[int] = None,            # single frame
+    frames: Optional[Iterable[int]] = None,    # explicit set/list of frames
+    min_frame: Optional[int] = None,           # range mode (used if frames=None and frame_id=None)
+    max_frame: Optional[int] = None,
+    n_even: Optional[int] = None,              # optionally pick n evenly spaced frames from [min,max]
+
+    # ---- grid/model ----
+    grid: Optional[Tuple[np.ndarray, np.ndarray]] = None,  # (X, Y); else use model.grid or default
+
+    # ---- influence → pitch-control knobs ----
+    smooth_sigma: float = 2.0,
+    pitch_k: float = 25.0,
+    neutral_band: Tuple[float, float] = (0.45, 0.55),
+
+    # ---- density caching/recompute ----
+    use_cached_density: bool = True,
+    force_recompute: bool = False,
+    cache_back_to_df: bool = False,
+
+    # ---- heading handling (consistent with your class) ----
+    heading_col: str = "dir",      # prefer "dir"; falls back to "direction" if missing
+    invert_heading: bool = False,  # set True ONLY if your data is known to be 180° flipped
+
+    # ---- misc ----
+    exclude_football: bool = True,
+    verbose: bool = False,
+):
+    """
+    Compute per-player Gaussian–Gamma influence and team pitch control for one OR many frames.
+
+    Always returns multi-frame-shaped outputs; for a single frame you'll just have one key.
+
+    Returns
+    -------
+    players_all : pd.DataFrame
+        One row per (frameId, player) with columns like:
+        ['frameId','nflId','displayName','jerseyNumber','x','y','speed','direction',
+         'is_off','dist_from_football','density','sum_density', ...]
+    offense_by_frame : Dict[int, pd.DataFrame]
+        Smoothed offensive influence grid per frame (index=y, columns=x).
+    defense_by_frame : Dict[int, pd.DataFrame]
+        Smoothed defensive influence grid per frame (index=y, columns=x).
+    pitch_by_frame : Dict[int, pd.DataFrame]
+        Pitch control per frame (index=y, columns=x), with neutral band masked to NaN.
+    grid_out : (X, Y)
+        The meshgrid used.
+    frames_used : List[int]
+        The exact frameIds computed (in order).
+    """
+    # ------------------------ grid setup ------------------------
+    if grid is not None:
+        X, Y = grid
+    elif hasattr(model, "grid") and getattr(model, "grid", None) is not None:
+        try:
+            X, Y = model.grid.X, model.grid.Y
+        except AttributeError:
+            X, Y = model.grid
+    else:
+        x_vals = np.linspace(0.0, 120.0, 200)
+        y_vals = np.linspace(0.0, 53.3, 100)
+        X, Y = np.meshgrid(x_vals, y_vals)
+
+    x_vals = X[0, :]
+    y_vals = Y[:, 0]
+    grid_out = (X, Y)
+
+    # ------------------------ frame list ------------------------
+    if frame_id is not None:
+        frames_used = [int(frame_id)]
+    elif frames is not None:
+        frames_used = sorted({int(f) for f in frames})
+    else:
+        fmin = int(min_frame if min_frame is not None else df["frameId"].min())
+        fmax = int(max_frame if max_frame is not None else df["frameId"].max())
+        if n_even and n_even > 0:
+            present = np.sort(df["frameId"].unique())
+            targets = np.linspace(fmin, fmax, n_even)
+            frames_used: List[int] = []
+            for t in targets:
+                nearest = int(present[np.argmin(np.abs(present - t))])
+                if not frames_used or frames_used[-1] != nearest:
+                    frames_used.append(nearest)
+        else:
+            frames_used = list(range(fmin, fmax + 1))
+
+    # ------------------------ helpers ------------------------
+    def _sigmoid(z, k): return 1.0 / (1.0 + np.exp(-k * z))
+    def _safe_norm(A):
+        mx = A.max()
+        return A / mx if mx > 0 else A
+
+    rows_out: List[dict] = []
+    offense_by_frame: Dict[int, pd.DataFrame] = {}
+    defense_by_frame: Dict[int, pd.DataFrame] = {}
+    pitch_by_frame: Dict[int, pd.DataFrame] = {}
+
+    # ------------------------ main loop ------------------------
+    for fid in frames_used:
+        frame_df = df[df["frameId"] == fid].copy()
+        if frame_df.empty:
+            if verbose:
+                print(f"[pitch_control] frame {fid}: no rows; skipping")
+            continue
+
+        # filter out football & NaN is_off
+        if exclude_football and "displayName" in frame_df.columns:
+            frame_df = frame_df[frame_df["displayName"].str.lower() != "football"]
+        if "is_off" in frame_df.columns:
+            frame_df = frame_df[frame_df["is_off"].notna()]
+        frame_df = frame_df.reset_index(drop=True)
+        if frame_df.empty:
+            if verbose:
+                print(f"[pitch_control] frame {fid}: only football/NaN is_off rows; skipping")
+            continue
+
+        # -------- densities for this frame --------
+        have_cache = ("density" in frame_df.columns) and frame_df["density"].notna().all()
+        if use_cached_density and have_cache and not force_recompute:
+            densities = np.stack(frame_df["density"].to_numpy(), axis=0)
+        else:
+            if model is None:
+                raise ValueError(
+                    f"Recompute requested but no `model` provided (frame={fid}). "
+                    "Pass a PlayerInfluenceModel or set use_cached_density=True."
+                )
+            dens_list = []
+            for _, r in frame_df.iterrows():
+                x0, y0 = float(r["x"]), float(r["y"])
+                pos = (x0, y0)
+
+                # choose heading col robustly
+                if heading_col in r and pd.notna(r[heading_col]):
+                    dir_deg = float(r[heading_col])
+                elif "direction" in r and pd.notna(r["direction"]):
+                    dir_deg = float(r["direction"])
+                else:
+                    dir_deg = 0.0  # fallback; or raise if you prefer
+
+                if invert_heading:
+                    dir_deg = (dir_deg + 180.0) % 360.0
+
+                spd = float(r["s"] if "s" in r else r.get("speed", 0.0))
+                dball = float(r.get("dist_from_football", 0.0))
+
+                pos_off = model.compute_offset(pos, dir_deg, spd)
+                Z = model.base_distribution(
+                    pos_xy=pos,
+                    pos_off_xy=pos_off,
+                    direction_deg=dir_deg,
+                    speed=spd,
+                    dist_from_ball=dball,
+                )
+                dens_list.append(Z)
+
+            densities = np.stack(dens_list, axis=0)
+            if cache_back_to_df:
+                frame_df.loc[:, "density"] = dens_list
+
+        # remove speckle
+        densities = np.where(densities < 1e-3, 0.0, densities)
+
+        # team splits
+        is_off = frame_df["is_off"].to_numpy().astype(bool) if "is_off" in frame_df.columns else np.zeros(len(frame_df), bool)
+        inf_off = densities[is_off].sum(axis=0) if is_off.any() else np.zeros_like(X)
+        inf_def = densities[~is_off].sum(axis=0) if (~is_off).any() else np.zeros_like(X)
+
+        # normalize + smooth
+        inf_off = _safe_norm(inf_off)
+        inf_def = _safe_norm(inf_def)
+        if smooth_sigma and smooth_sigma > 0:
+            inf_off = gaussian_filter(inf_off, sigma=smooth_sigma)
+            inf_def = gaussian_filter(inf_def, sigma=smooth_sigma)
+
+        # pitch control (defense→1.0); mask near 50/50
+        pc = _sigmoid(inf_def - inf_off, k=pitch_k)
+        lo, hi = neutral_band
+        pc_masked = np.where((pc >= lo) & (pc <= hi), np.nan, pc)
+
+        # per-player summary for this frame
+        sum_density = densities.reshape(densities.shape[0], -1).sum(axis=1)
+        frame_rows = frame_df.assign(frameId=fid, sum_density=sum_density).copy()
+
+        # unify column names expected downstream
+        if "s" in frame_rows.columns and "speed" not in frame_rows.columns:
+            frame_rows = frame_rows.rename(columns={"s": "speed"})
+        if heading_col in frame_rows.columns and "direction" not in frame_rows.columns:
+            frame_rows = frame_rows.rename(columns={heading_col: "direction"})
+
+        rows_out.append(frame_rows)
+
+        # stash grids
+        offense_by_frame[fid] = pd.DataFrame(inf_off, index=y_vals, columns=x_vals)
+        defense_by_frame[fid] = pd.DataFrame(inf_def, index=y_vals, columns=x_vals)
+        pitch_by_frame[fid]   = pd.DataFrame(pc_masked, index=y_vals, columns=x_vals)
+
+        if verbose and (fid == frames_used[0] or fid == frames_used[-1] or fid % 10 == 0):
+            print(f"[pitch_control] frame {fid}: players={len(frame_rows)}")
+
+    players_all = pd.concat(rows_out, ignore_index=True) if rows_out else pd.DataFrame()
+    return players_all, offense_by_frame, defense_by_frame, pitch_by_frame, grid_out, frames_used
